@@ -1,0 +1,24 @@
+{
+  "name": "event-stream",
+  "version": "1.0.0",
+  "description": "Allows microservices to interact via an event stream.",
+  "repository": "github:birminghamurbanobservatory/event-stream",
+  "main": "index.js",
+  "scripts": {
+    "test": "jest --env=node"
+  },
+  "author": "Simon Bell",
+  "license": "ISC",
+  "devDependencies": {
+    "jest": "^24.8.0"
+  },
+  "dependencies": {
+    "@hapi/joi": "^15.1.0",
+    "amqp": "^0.2.7",
+    "amqplib": "^0.5.3",
+    "bluebird": "^3.5.5",
+    "check-types": "^9.0.1",
+    "node-logger": "github:birminghamurbanobservatory/node-logger#semver:^1.0.0",
+    "shortid": "^2.2.14"
+  }
+}
