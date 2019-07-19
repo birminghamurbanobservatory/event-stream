@@ -2,7 +2,7 @@
 // Dependencies
 //-------------------------------------------------
 const amqp   = require('amqplib');
-const joi    = require('joi');
+const joi    = require('@hapi/joi');
 const logger = require('node-logger');
 const check  = require('check-types');
 const shortid = require('shortid');
