@@ -19,6 +19,7 @@
     "bluebird": "^3.5.5",
     "check-types": "^9.0.1",
     "node-logger": "github:birminghamurbanobservatory/node-logger#semver:^1.0.0",
+    "require-directory": "^2.1.1",
     "shortid": "^2.2.14"
   }
 }

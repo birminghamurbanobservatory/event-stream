@@ -10,6 +10,17 @@ const Promise = require('bluebird');
 
 
 //-------------------------------------------------
+// Load in some custom errors
+//-------------------------------------------------
+const {
+  EventStreamError,
+  InvalidPublishMessage,
+  InvalidEventName,
+  EventStreamResponseError
+} = require('./errors');
+
+
+//-------------------------------------------------
 // Module Exports
 //-------------------------------------------------
 exports = module.exports = {
@@ -38,7 +49,7 @@ const _subscriptions = [];
 function init(opts) {
 
   if (_initialised === true) {
-    return Promise.reject(new Error('AMQP Events Already Initialised'));
+    return Promise.reject(new EventStreamError('AMQP Events Already Initialised'));
   }
 
   // Validate the opts object
@@ -54,7 +65,7 @@ function init(opts) {
   const {error: err, value: options} = joi.validate(opts, schema);
 
   if (err) {
-    return Promise.reject(new Error(`Invalid init options: ${err.message}`));
+    return Promise.reject(new EventStreamError(`Invalid init options: ${err.message}`));
   }
 
   _options = options;
@@ -70,7 +81,7 @@ function init(opts) {
   .catch((err) => {
     logger.error('Failed to connect to AMQP', err);
     reactToFailedConnection();
-    return Promise.reject(new Error('Failed to initialise AMQP Events'));
+    return Promise.reject(new EventStreamError('Failed to initialise AMQP Events'));
   });
 
 }
@@ -123,19 +134,19 @@ function connect(url) {
 function publish(eventName, message, opts = {}) {
 
   if (check.not.nonEmptyString(eventName)) {
-    return Promise.reject(new Error('eventName should be a non-empty string'));
+    return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
   if (!(check.string(message) || check.object(message) || check.array(message))) {
-    return Promise.reject(new Error('The message must be a string or POJO'));
+    return Promise.reject(new InvalidPublishMessage('The message must be a string or POJO'));
   }  
 
   if (_initialised !== true) {
-    return Promise.reject(new Error('AMQP Events must first be initialised'));
+    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
   }
 
   if (_connected !== true) {
-    return Promise.reject(new Error('Must establish AMQP connection first'));
+    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
   }
 
   // Validate the opts object
@@ -147,7 +158,7 @@ function publish(eventName, message, opts = {}) {
   const {error: err, value: options} = joi.validate(opts, schema);
 
   if (err) {
-    Promise.reject(new Error(`Invalid publish options: ${err.message}`));
+    Promise.reject(new EventStreamError(`Invalid publish options: ${err.message}`));
   }  
 
   // Convert message to a buffer
@@ -181,24 +192,16 @@ function publish(eventName, message, opts = {}) {
 //-------------------------------------------------
 // Publish a request and wait for a response
 //-------------------------------------------------
-// This allows for the request/response pattern.  
+// This allows for the request/response pattern.
 // Further info: https://medium.com/@pulkitswarup/microservices-asynchronous-request-response-pattern-6d00ab78abb6
 function publishExpectingResponse(eventName, message, opts) {
 
-  // Custom error - for an issue with the request
-  function AysncRequestError(message) {
-    this.constructor.prototype.__proto__ = Error.prototype; // Make this an instanceof Error.
-    Error.captureStackTrace(this, this.constructor); // Creates the this.stack getter
-    this.name = this.constructor.name; // Ensure the name of the error will be printed out
-    this.message = message;
-  }   
-
   if (check.not.nonEmptyString(eventName)) {
-    return Promise.reject(new AysncRequestError('eventName should be a non-empty string'));
+    return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
   if (!(check.string(message) || check.object(message) || check.array(message))) {
-    return Promise.reject(new AysncRequestError('The message must be a string or POJO'));
+    return Promise.reject(new InvalidPublishMessage('The message must be a string or POJO'));
   }    
 
   const optionsSchema = joi.object({
@@ -213,7 +216,7 @@ function publishExpectingResponse(eventName, message, opts) {
   const {error: err, value: validOptions} = joi.validate(opts, optionsSchema);
 
   if (err) {
-    return Promise.reject(new Error(`Invalid opts: ${err.message}`));
+    return Promise.reject(new EventStreamError(`Invalid opts: ${err.message}`));
   }
 
   const defaultOptions = {
@@ -225,23 +228,14 @@ function publishExpectingResponse(eventName, message, opts) {
   const options = Object.assign(defaultOptions, validOptions);
 
   if (_initialised !== true) {
-    return Promise.reject(new Error('AMQP Events must first be initialised'));
+    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
   } 
 
   if (_connected !== true) {
-    return Promise.reject(new Error('Must establish AMQP connection first'));
+    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
   }
 
   let gotResponse = false;
-
-  // Custom Error - For responses that have an error
-  function AsyncResponseError(message, errorCode) {
-    this.constructor.prototype.__proto__ = Error.prototype; // Make this an instanceof Error.
-    Error.captureStackTrace(this, this.constructor); // Creates the this.stack getter
-    this.name = this.constructor.name; // Ensure the name of the error will be printed out
-    this.message = message;
-    this.errorCode = errorCode;
-  }     
 
   // Begin by listening to the replyTo queue
   return new Promise((resolve, reject) => {
@@ -262,7 +256,8 @@ function publishExpectingResponse(eventName, message, opts) {
 
           if (msg.correlationId === options.correlationId) {
             if (msg.error) {
-              reject(new AsyncResponseError(msg.error.message, msg.error.errorCode));
+              // N.B. this error uses the name from the event stream as its name property, rather than the name of the custom class like other custom classes would.
+              reject(new EventStreamResponseError(msg.error.name, msg.error.message, msg.error.statusCode));
             } else {
               resolve(msg.body);
             }
@@ -340,15 +335,15 @@ function deleteReplyToQueue(queueName) {
 function subscribe(eventName, cbFunc) {
 
   if (check.not.nonEmptyString(eventName)) {
-    return Promise.reject(new Error('eventName should be a non-empty string'));
+    return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
   if (check.not.function(cbFunc)) {
-    return Promise.reject(new Error('cbFunc should be a function'));
+    return Promise.reject(new EventStreamError('cbFunc should be a function'));
   }
 
   if (_initialised !== true) {
-    return Promise.reject(new Error('AMQP Events must first be initialised'));
+    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
   } 
 
   // It's possible that the message received is any object containing replyTo and correlationId properties, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to. All the applications callback function needs to do is return a promise that resolves with the data that needs to be returned (or rejects with an error).
@@ -367,7 +362,7 @@ function subscribe(eventName, cbFunc) {
       }
 
       try {
-        await respondToAsyncRequest(response, message.replyTo, message.correlationId);
+        await respondToRequest(response, message.replyTo, message.correlationId);
       } catch (err) {
         logger.error('Failed to respond to an request that expected a response.', err);
       }
@@ -383,7 +378,7 @@ function subscribe(eventName, cbFunc) {
   _subscriptions.push({eventName, cbFuncWithWrapper});
 
   if (_connected !== true) {
-    return Promise.reject(new Error('Must establish AMQP connection first'));
+    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
   } else {
     return consume(eventName, cbFuncWithWrapper);
   }  
@@ -397,11 +392,11 @@ function subscribe(eventName, cbFunc) {
 function consume(exchangeName, cbFunc) {
 
   if (check.not.nonEmptyString(exchangeName)) {
-    return Promise.reject(new Error('exchangeName should be a non-empty string'));
+    return Promise.reject(new EventStreamError('exchangeName should be a non-empty string'));
   }
 
   if (check.not.function(cbFunc)) {
-    return Promise.reject(new Error('cbFunc should be a function'));
+    return Promise.reject(new EventStreamError('cbFunc should be a function'));
   }
 
 
@@ -443,21 +438,21 @@ function consume(exchangeName, cbFunc) {
 
 
 //-------------------------------------------------
-// Response to an async request
+// Response to request
 //-------------------------------------------------
 // reponse can be a string or POJO reponse that will for the message body, or it can be an Error object in which case the message will include an error object.
-function respondToAsyncRequest(response, replyTo, correlationId) {
+function respondToRequest(response, replyTo, correlationId) {
 
   if (!(check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
-    return Promise.reject(new Error('The response must be a string, POJO or Error object.'));
+    return Promise.reject(new EventStreamError('The response must be a string, POJO or Error object.'));
   }
 
   if (check.not.nonEmptyString(replyTo)) {
-    return Promise.reject(new Error('replyTo should be a non-empty string'));
+    return Promise.reject(new EventStreamError('replyTo should be a non-empty string'));
   }  
 
   if (check.not.nonEmptyString(correlationId)) {
-    return Promise.reject(new Error('correlationId should be a non-empty string'));
+    return Promise.reject(new EventStreamError('correlationId should be a non-empty string'));
   }
 
   const errorOccurred = check.instance(response, Error);
@@ -468,9 +463,12 @@ function respondToAsyncRequest(response, replyTo, correlationId) {
   
   if (errorOccurred) {
     messageToSend.error = {
-      message: response.message || 'An error occurred whilst generating a response to the async request.',
-      errorCode: response.errorCode || 'RESPONSE_ERROR'
+      name: response.name,
+      message: response.message
     };
+    if (check.number(response.statusCode)) {
+      messageToSend.error.statusCode = response.statusCode;
+    }
   } else {
     messageToSend.body = response;
   }
@@ -497,7 +495,7 @@ function convertToBuffer(toSend) {
   } else if (check.object(toSend) || check.array(toSend)) {
     toSendStr = JSON.stringify(toSend);
   } else {
-    throw new Error(`Can only convert strings or POJO to a buffer, not: ${typeof toSend}.`);
+    throw new EventStreamError(`Can only convert strings or POJO to a buffer, not: ${typeof toSend}.`);
   }
 
   return Buffer.from(toSendStr);
