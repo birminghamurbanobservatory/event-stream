@@ -27,7 +27,8 @@ exports = module.exports = {
   init,
   publish,
   publishExpectingResponse,
-  subscribe
+  subscribe,
+  EventStreamError // handy to export this to identify event stream errors
 };
 
 // Module globals

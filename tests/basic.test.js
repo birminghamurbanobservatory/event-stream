@@ -21,3 +21,15 @@ describe('Publish tests', () => {
   });
    
 });
+
+
+
+describe('Error tests', () => {
+
+  test('Should export custom EventSteamError', () => {
+    const e = new event.EventStreamError();
+    expect(e).toBeInstanceOf(Error);
+    expect(e).toBeInstanceOf(event.EventStreamError);
+  });
+
+});
