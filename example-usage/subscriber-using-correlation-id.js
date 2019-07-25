@@ -3,7 +3,10 @@
 //-------------------------------------------------
 const event = require('../index');
 const logger = require('node-logger');
-const Promise = require('bluebird');
+const correlator = require('./correlator');
+
+// IMPORTANT: You'll need to run the equivalent publisher file once this is running first, e.g. in a separate tab.
+// Made sense to run the publisher and subscriber separately to ensure the correlationId had come through the event-stream rather than some local "short-circuit".
 
 //-------------------------------------------------
 // Config
@@ -11,17 +14,21 @@ const Promise = require('bluebird');
 logger.configure({level: 'debug', enabled: true, format: 'terminal'});
 const url = 'amqp://localhost';
 const appName = 'example-app';
-const eventName = 'some-event';
+const eventName = 'the-time';
 
 
 //-------------------------------------------------
 // Init
 //-------------------------------------------------
-event.init({url, appName})
+event.init({
+  url, 
+  appName,
+  withCorrelationId: correlator.withId,
+  getCorrelationId: correlator.getId
+})
 .then(() => {
   logger.debug('Initialisation ok');
   startSubscribing();
-  startPublishing();
 })
 .catch((err) => {
   logger.error('Error during event-stream initialisation', err);
@@ -44,52 +51,18 @@ event.logsEmitter.on('debug', (msg) => {
 
 
 
-let myNumber = 1;
-
-
-//-------------------------------------------------
-// Publish
-//-------------------------------------------------
-function startPublishing() {
-
-  setInterval(() => {
-    publishNumber(myNumber);
-    myNumber++;
-  }, 4000);
-
-}
-
-
-function publishNumber(myNumber) {
-
-  logger.debug(`Publishing number ${myNumber}`);
-  event.publishExpectingResponse(eventName, {number: myNumber})
-  .then((response) => {
-    logger.debug(`Got response of: ${response.number}`);
-  })
-  .catch((err) => {
-    logger.debug('Failed to publish', err);
-  });
-
-}
-
-
 //-------------------------------------------------
 // Subscribe
 //-------------------------------------------------
 function startSubscribing() {
 
-  event.subscribe(eventName, async (message) => {
+  event.subscribe(eventName, (message) => {
 
-    logger.debug(`New ${eventName} event message:`, message);
+    logger.debug(`New ${eventName} event message: ${message}`);
 
-    // Let's pretend this involved an async operation, e.g. database read.
-    const doubled = await Promise.delay(1000)
-    .then(() => {
-      return message.number * 2;
-    });
-
-    return {number: doubled};
+    // Let's see if the correlationId is available.
+    const correlationId = correlator.getId();
+    logger.debug(`CorrelationId: ${correlationId}`);
     
   })
   .then(() => {
@@ -100,3 +73,4 @@ function startSubscribing() {
   });
 
 }
+

@@ -1,9 +1,14 @@
+// Correlation ids are used to track a request that may reply on multiple microservices to fufill. They differ from the replyId used by the event-stream, this is purely used to identify the response to a request.
+
+// IMPORTANT: Make sure the equivalent subscriber file is running first, e.g. in a separate tab.
+// Made sense to run the publisher and subscriber separately to ensure the correlationId had come through the event-stream rather than some local "short-circuit".
+
 //-------------------------------------------------
 // Dependencies
 //-------------------------------------------------
 const event = require('../index');
 const logger = require('node-logger');
-const Promise = require('bluebird');
+const correlator = require('./correlator');
 
 //-------------------------------------------------
 // Config
@@ -11,22 +16,25 @@ const Promise = require('bluebird');
 logger.configure({level: 'debug', enabled: true, format: 'terminal'});
 const url = 'amqp://localhost';
 const appName = 'example-app';
-const eventName = 'some-event';
+const eventName = 'double-my-number';
 
 
 //-------------------------------------------------
 // Init
 //-------------------------------------------------
-event.init({url, appName})
+event.init({
+  url, 
+  appName,
+  withCorrelationId: correlator.withId,
+  getCorrelationId: correlator.getId
+})
 .then(() => {
   logger.debug('Initialisation ok');
-  startSubscribing();
   startPublishing();
 })
 .catch((err) => {
   logger.error('Error during event-stream initialisation', err);
   // Let's add the subscriptions even if the init failed (e.g. because RabbitMQ wasn't turned on yet), this ensures the subscriptions get added to the list and will be automatically re-established if the connection returns.  
-  startSubscribing();
 });
 
 event.logsEmitter.on('error', (msg) => {
@@ -43,60 +51,38 @@ event.logsEmitter.on('debug', (msg) => {
 });
 
 
-
 let myNumber = 1;
-
 
 //-------------------------------------------------
 // Publish
 //-------------------------------------------------
 function startPublishing() {
 
-  setInterval(() => {
-    publishNumber(myNumber);
-    myNumber++;
-  }, 4000);
+  // setInterval(() => {
+  //   publishNumber(myNumber);
+  //   myNumber++;
+  // }, 3000);
+
+  publishNumber(13);
 
 }
 
 
 function publishNumber(myNumber) {
 
-  logger.debug(`Publishing number ${myNumber}`);
-  event.publishExpectingResponse(eventName, {number: myNumber})
-  .then((response) => {
-    logger.debug(`Got response of: ${response.number}`);
-  })
-  .catch((err) => {
-    logger.debug('Failed to publish', err);
-  });
+  const correlationId = `aaaaaa${myNumber}`;
 
-}
+  correlator.withId(() => {
 
-
-//-------------------------------------------------
-// Subscribe
-//-------------------------------------------------
-function startSubscribing() {
-
-  event.subscribe(eventName, async (message) => {
-
-    logger.debug(`New ${eventName} event message:`, message);
-
-    // Let's pretend this involved an async operation, e.g. database read.
-    const doubled = await Promise.delay(1000)
-    .then(() => {
-      return message.number * 2;
+    logger.debug(`Publishing number ${myNumber}`);
+    event.publishExpectingResponse(eventName, {number: myNumber})
+    .then((response) => {
+      logger.debug(`Got response of: ${response.number}`);
+    })
+    .catch((err) => {
+      logger.debug('Failed to publish', err);
     });
 
-    return {number: doubled};
-    
-  })
-  .then(() => {
-    logger.debug(`Subscribed to ${eventName} events`);
-  })
-  .catch((err) => {
-    logger.error(`Failed to subscribe to ${eventName} event`, err);
-  });
+  }, correlationId);
 
 }

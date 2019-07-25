@@ -3,10 +3,11 @@
 //-------------------------------------------------
 const amqp   = require('amqplib');
 const joi    = require('@hapi/joi');
-const logger = require('node-logger');
 const check  = require('check-types');
-const shortid = require('shortid');
+const shortId = require('shortid');
 const Promise = require('bluebird');
+const util         = require('util');
+const EventEmitter = require('events').EventEmitter;
 
 
 //-------------------------------------------------
@@ -24,6 +25,29 @@ const {
 
 
 //-------------------------------------------------
+// Create an event emitter
+//-------------------------------------------------
+function LogsObservable() {  
+  EventEmitter.call(this);
+}
+util.inherits(LogsObservable, EventEmitter); 
+
+LogsObservable.prototype.error = function (message) {  
+  this.emit('error', message);
+};
+LogsObservable.prototype.warn = function (message) {  
+  this.emit('warn', message);
+};
+LogsObservable.prototype.info = function (message) {  
+  this.emit('info', message);
+};
+LogsObservable.prototype.debug = function (message) {  
+  this.emit('debug', message);
+};
+
+const logsEmitter = new LogsObservable();
+
+//-------------------------------------------------
 // Module Exports
 //-------------------------------------------------
 exports = module.exports = {
@@ -31,6 +55,7 @@ exports = module.exports = {
   publish,
   publishExpectingResponse,
   subscribe,
+  logsEmitter,
   EventStreamError, // handy to export these errors so client code can identify them (i.e. with 'instanceof')
   EventStreamOperationalError,
   EventStreamResponseError
@@ -64,7 +89,9 @@ function init(opts) {
             .uri()
             .required(),
     appName: joi.string()
-      .required()
+      .required(),
+    withCorrelationId: joi.func(),
+    getCorrelationId: joi.func()
   })
   .required();
 
@@ -81,11 +108,11 @@ function init(opts) {
   // Set up the connection - connections are expensive to open hence why we try to only have one open.
   return connect(_options.url)
   .then(() => {
-    logger.info('Event stream connection has been made');
+    logsEmitter.info('Event stream connection has been made');
     return;
   })
   .catch((err) => {
-    logger.error('Failed to connect to event stream', err);
+    logsEmitter.error(`Failed to connect to event stream. Reason: ${err.message}`);
     reactToFailedConnection();
     return Promise.reject(new NoEventStreamConnection('Failed to initialise event stream connection'));
   });
@@ -102,11 +129,11 @@ function connect(url) {
     _conn = conn;
 
     _conn.on('error', (err) => {
-      logger.error('Event stream connection error', err);
+      logsEmitter.error(`Event stream connection error: ${err.message}`);
     });
 
     _conn.on('close', (err) => {
-      logger.warn('The event stream connection was closed', err);
+      logsEmitter.info(`Event stream connection closed: ${err.message}`);
       reactToFailedConnection();
     });
 
@@ -116,12 +143,12 @@ function connect(url) {
       _connected = true;
 
       _channel.on('error', (err) => {
-        logger.error('AMQP channel error', err);
+        logsEmitter.error(`AMQP channel error: ${err.message}`);
       });
 
       _channel.on('close', () => {
         // A channel close event provides no err object unlike a connection close event.
-        logger.warn('The AMQP channel was closed');
+        logsEmitter.info('The AMQP channel was closed');
         reactToFailedConnection();
       });
 
@@ -152,7 +179,7 @@ function publish(eventName, body, opts = {}) {
   }
 
   if (_connected !== true) {
-    return Promise.reject(new NoEventStreamConnection('Must establish event stream connection first'));
+    return Promise.reject(new NoEventStreamConnection('Currently not connected to the event stream'));
   }
 
   // Validate the opts object
@@ -161,21 +188,26 @@ function publish(eventName, body, opts = {}) {
       .min(5)
   });
 
-  const {error: err, value: validOptions} = joi.validate(opts, schema);
+  const {error: err, value: options} = joi.validate(opts, schema);
 
   if (err) {
     Promise.reject(new EventStreamError(`Invalid publish options: ${err.message}`));
   }  
 
-  const defaultOptions = {
-    correlationId: shortid.generate()
-  };   
-
-  const options = Object.assign({}, defaultOptions, validOptions);
+  let correlationId;
+  // Use the correlationId passed to the function by default
+  if (options.correlationId) {
+    correlationId = options.correlationId;
+  // If not see if one is available via the getCorrelationId function. If not generate one.
+  } else if (check.assigned(_options.getCorrelationId)) {
+    correlationId = _options.getCorrelationId() || shortId.generate();
+  } else {
+    correlationId = shortId.generate();
+  }
 
   const message = {
     body,
-    correlationId: options.correlationId
+    correlationId
   };
 
   // Convert message to a buffer
@@ -222,7 +254,7 @@ function publishExpectingResponse(eventName, body, opts) {
   } 
 
   if (_connected !== true) {
-    return Promise.reject(new NoEventStreamConnection('Must establish event stream connection first'));
+    return Promise.reject(new NoEventStreamConnection('Currently not connected to the event stream'));
   }
 
   const optionsSchema = joi.object({
@@ -240,18 +272,28 @@ function publishExpectingResponse(eventName, body, opts) {
     return Promise.reject(new EventStreamError(`Invalid opts: ${err.message}`));
   }
 
+  let correlationIdIfNonePassedIn;
+  if (check.assigned(_options.getCorrelationId)) {
+    correlationIdIfNonePassedIn = _options.getCorrelationId() || shortId.generate();
+  } else {
+    correlationIdIfNonePassedIn = shortId.generate();
+  }
+
   const defaultOptions = {
-    correlationId: shortid.generate(),
-    replyTo: shortid.generate(),
+    correlationId: correlationIdIfNonePassedIn,
+    replyTo: shortId.generate(),
     timeout: 5000
   }; 
+
+  const replyId = shortId.generate();
 
   const options = Object.assign({}, defaultOptions, validOptions);
 
   const message = {
     body,
     correlationId: options.correlationId,
-    replyTo: options.replyTo
+    replyTo: options.replyTo,
+    replyId
   };
 
   const messageBuffer = convertToBuffer(message);
@@ -275,7 +317,7 @@ function publishExpectingResponse(eventName, body, opts) {
             reject(err);
           }
 
-          if (msg.correlationId === options.correlationId) {
+          if (msg.replyId === replyId) {
             if (msg.error) {
               // N.B. this error uses the name from the event stream as its name property, rather than the name of the custom class like other custom classes would.
               reject(new EventStreamResponseError(msg.error.name, msg.error.message, msg.error.statusCode));
@@ -337,10 +379,10 @@ function deleteReplyToQueue(queueName) {
 
   _channel.deleteQueue(queueName)
   .then(() => {
-    logger.debug(`The replyTo queue (${queueName}) has been deleted.`);
+    logsEmitter.debug(`The replyTo queue (${queueName}) has been deleted.`);
   })
   .catch((err) => {
-    logger.error(`Failed to delete queue: ${queueName}. Reason: ${err.message}`);
+    logsEmitter.error(`Failed to delete queue: ${queueName}. Reason: ${err.message}`);
   });
 
 }
@@ -370,36 +412,52 @@ function subscribe(eventName, cbFunc) {
 
     // TODO: should I check the message is valid here, before handing it over to the cbFunc?
 
-    const expectingReply = check.nonEmptyObject(message) && check.nonEmptyString(message.replyTo);
+    const expectingReply = check.nonEmptyObject(message) && check.nonEmptyString(message.replyTo) && check.nonEmptyString(message.replyId);
+
+    // Set the current correlationId, i.e. so loggers in the client's cbFunc can access it.
+    const bindCorrelationIdToCbFunc = check.nonEmptyObject(message) && check.nonEmptyString(message.correlationId) && check.assigned(_options.withCorrelationId);
 
     if (expectingReply) {
-      logger.debug(`A ${eventName} has been received with correlationId: ${message.correlationId}, which expects a response on a replyTo queue named: ${message.replyTo}`);
+      logsEmitter.debug(`A ${eventName} event has been received with correlationId: ${message.correlationId}, which expects a response on a replyTo queue named: ${message.replyTo} with a replyId of ${message.replyId}`);
       let response;
       try {
-        // Gives the full message to the cbFunc, as the cbFunc should have access to the correlationId so it can add it to any logs to aid debugging.
-        response = await cbFunc(message); 
+        if (bindCorrelationIdToCbFunc) {
+          response = await _options.withCorrelationId(async () => {
+            const resultOfCbFunc = await cbFunc(message.body);
+            return resultOfCbFunc;
+          }, message.correlationId);
+        } else {
+          response = await cbFunc(message.body);
+        }
       } catch (err) {
         response = err;
       }
 
       try {
-        await respondToRequest(response, message.replyTo, message.correlationId);
+        await respondToRequest(response, message.replyTo, message.replyId, message.correlationId);
       } catch (err) {
-        logger.error('Failed to respond to an request that expected a response.', err);
+        logsEmitter.error(`Failed to respond to an request that expected a response. Reason: ${err.message}`);
       }
 
     } else {
-      await cbFunc(message);
+      if (bindCorrelationIdToCbFunc) {
+        await _options.withCorrelationId(async () => {
+          await cbFunc(message.body);
+          return;
+        }, message.correlationId);
+      } else {
+        await cbFunc(message.body);
+      } 
     }
 
     return;
   };
 
   // Add this subscription to our list so we can add them again if connection ever goes down.
-  _subscriptions.push({eventName, cbFuncWithWrapper});
+  _subscriptions.push({eventName, cbFunc: cbFuncWithWrapper});
 
   if (_connected !== true) {
-    return Promise.reject(new EventStreamError('Must establish event stream connection first'));
+    return Promise.reject(new EventStreamError('Currently not connected to the event stream'));
   } else {
     return consume(eventName, cbFuncWithWrapper);
   }  
@@ -419,7 +477,6 @@ function consume(exchangeName, cbFunc) {
   if (check.not.function(cbFunc)) {
     return Promise.reject(new EventStreamError('cbFunc should be a function'));
   }
-
 
   // Create the exchange if it doesn't already exist
   return _channel.assertExchange(exchangeName, 'fanout', {durable: true})
@@ -462,7 +519,7 @@ function consume(exchangeName, cbFunc) {
 // Response to request
 //-------------------------------------------------
 // reponse can be a string or POJO reponse that will for the message body, or it can be an Error object in which case the message will include an error object.
-function respondToRequest(response, replyTo, correlationId) {
+function respondToRequest(response, replyTo, replyId, correlationId) {
 
   if (!(check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
     return Promise.reject(new EventStreamError('The response must be a string, POJO or Error object.'));
@@ -472,15 +529,19 @@ function respondToRequest(response, replyTo, correlationId) {
     return Promise.reject(new EventStreamError('replyTo should be a non-empty string'));
   }  
 
-  if (check.not.nonEmptyString(correlationId)) {
-    return Promise.reject(new EventStreamError('correlationId should be a non-empty string'));
+  if (check.not.nonEmptyString(replyId)) {
+    return Promise.reject(new EventStreamError('replyId should be a non-empty string'));
   }
 
   const errorOccurred = check.instance(response, Error);
 
   const messageToSend = {
-    correlationId
+    replyId
   };
+
+  if (correlationId) {
+    messageToSend.correlationId = correlationId;
+  }
   
   if (errorOccurred) {
     messageToSend.error = {
@@ -560,9 +621,9 @@ function reactToFailedConnection() {
 
   // Are we already retrying the connection?
   if (_retrying) {
-    logger.debug('Already trying to re-establish the connection');
+    logsEmitter.debug('Already trying to re-establish the connection');
   } else {
-    logger.warn('Retrying event stream connection straight away');
+    logsEmitter.info('Retrying event stream connection straight away');
     reconnect();
   }
 
@@ -579,7 +640,7 @@ function reconnect() {
 
   return connect(_options.url)
   .then(() => {
-    logger.info('Event stream connection reconnected successfully');
+    logsEmitter.info('Event stream connection reconnected successfully');
     _retrying = false;
     _currentWaitTime = _waitTimes[0];
 
@@ -587,28 +648,28 @@ function reconnect() {
 
       // Re-establish any subscriptions we had
       return Promise.map(_subscriptions, (sub) => {
-        logger.debug(`About to try reconnecting ${sub.eventName}`);
+        logsEmitter.debug(`About to try reconnecting ${sub.eventName}`);
         return consume(sub.eventName, sub.cbFunc)
         .then(() => {
-          logger.info(`Successfully re-established the ${sub.eventName} subscription`);
+          logsEmitter.info(`Successfully re-established the ${sub.eventName} subscription`);
           return;
         })
         .catch((err) => {
-          logger.error(`Failed to re-establish the ${sub.eventName} subscription`);
+          logsEmitter.error(`Failed to re-establish the ${sub.eventName} subscription. Reason: ${err.message}`);
           return;
         });
       });
 
     } else {
-      logger.info('There were no subscriptions that needed re-establishing after the reconnect');
+      logsEmitter.info('There were no subscriptions that needed re-establishing after the reconnect');
     }
 
   })
   .catch((err) => {
 
-    logger.error('Reconnect failed.', err);
+    logsEmitter.error(`Reconnect failed. Reason: ${err.message}`);
 
-    logger.warn(`Will try to reconnect event stream connection in ${_currentWaitTime} seconds`);
+    logsEmitter.info(`Will try to reconnect event stream connection in ${_currentWaitTime} seconds`);
     // Call itself again, the 'bind' here is crucial
     setTimeout(reconnect, _currentWaitTime * 1000);
     updateCurrentWaitTime(); // will make the waitTime longer for next time
