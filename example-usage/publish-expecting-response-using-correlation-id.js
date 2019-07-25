@@ -13,7 +13,12 @@ const correlator = require('./correlator');
 //-------------------------------------------------
 // Config
 //-------------------------------------------------
-logger.configure({level: 'debug', enabled: true, format: 'terminal'});
+logger.configure({
+  level: 'debug', 
+  enabled: true, 
+  format: 'json',
+  getCorrelationId: correlator.getId
+});
 const url = 'amqp://localhost';
 const appName = 'example-app';
 const eventName = 'double-my-number';
