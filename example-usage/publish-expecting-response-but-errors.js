@@ -83,9 +83,9 @@ function startSubscribing() {
     }
 
     if (message.number > 0) {
-      return {number: message.number * 2};
+      return {number: message.body.number * 2};
     } else {
-      return new InvalidNumberForDoubling(`Unable to double: ${message.number}`);
+      return new InvalidNumberForDoubling(`Unable to double: ${message.body.number}`);
     }
     
     

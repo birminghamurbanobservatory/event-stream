@@ -71,7 +71,7 @@ function startSubscribing() {
     // Let's pretend this involved an async operation, e.g. database read.
     const doubled = await Promise.delay(1000)
     .then(() => {
-      return message.number * 2;
+      return message.body.number * 2;
     });
 
     return {number: doubled};

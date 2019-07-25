@@ -14,9 +14,12 @@ const Promise = require('bluebird');
 //-------------------------------------------------
 const {
   EventStreamError,
-  InvalidPublishMessage,
+  InvalidPublishBody,
   InvalidEventName,
-  EventStreamResponseError
+  EventStreamResponseError,
+  EventStreamOperationalError,
+  NoEventStreamConnection,
+  EventStreamResponseTimeout
 } = require('./errors');
 
 
@@ -28,7 +31,9 @@ exports = module.exports = {
   publish,
   publishExpectingResponse,
   subscribe,
-  EventStreamError // handy to export this to identify event stream errors
+  EventStreamError, // handy to export these errors so client code can identify them (i.e. with 'instanceof')
+  EventStreamOperationalError,
+  EventStreamResponseError
 };
 
 // Module globals
@@ -50,7 +55,7 @@ const _subscriptions = [];
 function init(opts) {
 
   if (_initialised === true) {
-    return Promise.reject(new EventStreamError('AMQP Events Already Initialised'));
+    return Promise.reject(new EventStreamError('Event stream already initialised'));
   }
 
   // Validate the opts object
@@ -76,13 +81,13 @@ function init(opts) {
   // Set up the connection - connections are expensive to open hence why we try to only have one open.
   return connect(_options.url)
   .then(() => {
-    logger.info('AMQP connection has been made');
+    logger.info('Event stream connection has been made');
     return;
   })
   .catch((err) => {
-    logger.error('Failed to connect to AMQP', err);
+    logger.error('Failed to connect to event stream', err);
     reactToFailedConnection();
-    return Promise.reject(new EventStreamError('Failed to initialise AMQP Events'));
+    return Promise.reject(new NoEventStreamConnection('Failed to initialise event stream connection'));
   });
 
 }
@@ -97,11 +102,11 @@ function connect(url) {
     _conn = conn;
 
     _conn.on('error', (err) => {
-      logger.error('AMQP connection error', err);
+      logger.error('Event stream connection error', err);
     });
 
     _conn.on('close', (err) => {
-      logger.warn('The AMQP connection was closed', err);
+      logger.warn('The event stream connection was closed', err);
       reactToFailedConnection();
     });
 
@@ -132,35 +137,46 @@ function connect(url) {
 //-------------------------------------------------
 // For when we want to add a new message to the RabbitMQ queue
 // Returns a promise
-function publish(eventName, message, opts = {}) {
+function publish(eventName, body, opts = {}) {
 
   if (check.not.nonEmptyString(eventName)) {
     return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
-  if (!(check.string(message) || check.object(message) || check.array(message))) {
-    return Promise.reject(new InvalidPublishMessage('The message must be a string or POJO'));
-  }  
+  if (!(check.string(body) || check.object(body) || check.array(body))) {
+    return Promise.reject(new InvalidPublishBody('The message body must be a string or POJO'));
+  }
 
   if (_initialised !== true) {
-    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
+    return Promise.reject(new EventStreamError('Event stream must first be initialised'));
   }
 
   if (_connected !== true) {
-    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
+    return Promise.reject(new NoEventStreamConnection('Must establish event stream connection first'));
   }
 
   // Validate the opts object
   const schema = joi.object({
-    ttl: joi.number()
-            .positive()
+    correlationId: joi.string()
+      .min(5)
   });
 
-  const {error: err, value: options} = joi.validate(opts, schema);
+  const {error: err, value: validOptions} = joi.validate(opts, schema);
 
   if (err) {
     Promise.reject(new EventStreamError(`Invalid publish options: ${err.message}`));
   }  
+
+  const defaultOptions = {
+    correlationId: shortid.generate()
+  };   
+
+  const options = Object.assign({}, defaultOptions, validOptions);
+
+  const message = {
+    body,
+    correlationId: options.correlationId
+  };
 
   // Convert message to a buffer
   const messageBuffer = convertToBuffer(message);
@@ -170,10 +186,6 @@ function publish(eventName, message, opts = {}) {
   .then(() => {
     // Marking the messages as persistent will mean RabbitMQ will save them to disk, thus reducing the chances of messages being lost if RabbitMQ restarts.
     const publishOptions = {persistent: true};
-    if (options.ttl) {
-      // message discarded from the queue once it’s been there longer than the given number of milliseconds
-      publishOptions.expiration = options.ttl;
-    }
     return _channel.publish(eventName, '', messageBuffer, publishOptions);
   })
   .catch((err) => {
@@ -195,15 +207,23 @@ function publish(eventName, message, opts = {}) {
 //-------------------------------------------------
 // This allows for the request/response pattern.
 // Further info: https://medium.com/@pulkitswarup/microservices-asynchronous-request-response-pattern-6d00ab78abb6
-function publishExpectingResponse(eventName, message, opts) {
+function publishExpectingResponse(eventName, body, opts) {
 
   if (check.not.nonEmptyString(eventName)) {
     return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
-  if (!(check.string(message) || check.object(message) || check.array(message))) {
-    return Promise.reject(new InvalidPublishMessage('The message must be a string or POJO'));
+  if (!(check.string(body) || check.object(body) || check.array(body))) {
+    return Promise.reject(new InvalidPublishBody('The message body must be a string or POJO'));
   }    
+
+  if (_initialised !== true) {
+    return Promise.reject(new EventStreamError('Event stream must first be initialised'));
+  } 
+
+  if (_connected !== true) {
+    return Promise.reject(new NoEventStreamConnection('Must establish event stream connection first'));
+  }
 
   const optionsSchema = joi.object({
     correlationId: joi.string()
@@ -226,15 +246,15 @@ function publishExpectingResponse(eventName, message, opts) {
     timeout: 5000
   }; 
 
-  const options = Object.assign(defaultOptions, validOptions);
+  const options = Object.assign({}, defaultOptions, validOptions);
 
-  if (_initialised !== true) {
-    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
-  } 
+  const message = {
+    body,
+    correlationId: options.correlationId,
+    replyTo: options.replyTo
+  };
 
-  if (_connected !== true) {
-    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
-  }
+  const messageBuffer = convertToBuffer(message);
 
   let gotResponse = false;
 
@@ -273,31 +293,29 @@ function publishExpectingResponse(eventName, message, opts) {
     .then(() => {
 
       // Now to send the request
-      return publish(eventName, {
-        body: message,
-        replyTo: options.replyTo,
-        correlationId: options.correlationId       
-      },
-      {
-        ttl: options.timeout
-      }
-      );
+      return _channel.assertExchange(eventName, 'fanout', {durable: true})
+      .then(() => {
+        // Marking the messages as persistent will mean RabbitMQ will save them to disk, thus reducing the chances of messages being lost if RabbitMQ restarts.
+        const publishOptions = {persistent: true};
+        publishOptions.expiration = options.timeout;
+        return _channel.publish(eventName, '', messageBuffer, publishOptions);
+      })
+      .catch((err) => {
+        // If the error is because the channel is closed, then let's try to reconnect
+        if (err.message === 'Channel closed') {
+          reactToFailedConnection();
+        }
+        // Continue to pass on the error so if can be handled further down the chain
+        return Promise.reject(err);
+      });      
 
     })
     .then(() => {
 
-      // Custom error - for timed-out responses
-      function AsyncResponseTimeout(message) {
-        this.constructor.prototype.__proto__ = Error.prototype; // Make this an instanceof Error.
-        Error.captureStackTrace(this, this.constructor); // Creates the this.stack getter
-        this.name = this.constructor.name; // Ensure the name of the error will be printed out
-        this.message = message;
-      }        
-
       // Timeout if it takes too long to get a response
       setTimeout(() => {
         if (!gotResponse) {
-          reject(new AsyncResponseTimeout(`Timed out (${options.timeout} ms) whilst waiting for response to ${eventName}`));
+          reject(new EventStreamResponseTimeout(`Timed out (${options.timeout} ms) whilst waiting for response to ${eventName}`));
           deleteReplyToQueue(options.replyTo);
         }
       }, options.timeout);
@@ -344,12 +362,13 @@ function subscribe(eventName, cbFunc) {
   }
 
   if (_initialised !== true) {
-    return Promise.reject(new EventStreamError('AMQP Events must first be initialised'));
+    return Promise.reject(new EventStreamError('Event stream must first be initialised'));
   } 
 
-  // It's possible that the message received is any object containing replyTo and correlationId properties, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to. All the applications callback function needs to do is return a promise that resolves with the data that needs to be returned (or rejects with an error).
-
+  // It's possible that the message received has a replyTo property, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to.
   const cbFuncWithWrapper = async function (message) {
+
+    // TODO: should I check the message is valid here, before handing it over to the cbFunc?
 
     const expectingReply = check.nonEmptyObject(message) && check.nonEmptyString(message.replyTo);
 
@@ -357,7 +376,8 @@ function subscribe(eventName, cbFunc) {
       logger.debug(`A ${eventName} has been received with correlationId: ${message.correlationId}, which expects a response on a replyTo queue named: ${message.replyTo}`);
       let response;
       try {
-        response = await cbFunc(message.body);
+        // Gives the full message to the cbFunc, as the cbFunc should have access to the correlationId so it can add it to any logs to aid debugging.
+        response = await cbFunc(message); 
       } catch (err) {
         response = err;
       }
@@ -379,7 +399,7 @@ function subscribe(eventName, cbFunc) {
   _subscriptions.push({eventName, cbFuncWithWrapper});
 
   if (_connected !== true) {
-    return Promise.reject(new EventStreamError('Must establish AMQP connection first'));
+    return Promise.reject(new EventStreamError('Must establish event stream connection first'));
   } else {
     return consume(eventName, cbFuncWithWrapper);
   }  
@@ -542,7 +562,7 @@ function reactToFailedConnection() {
   if (_retrying) {
     logger.debug('Already trying to re-establish the connection');
   } else {
-    logger.warn('Retrying AMQP connection straight away');
+    logger.warn('Retrying event stream connection straight away');
     reconnect();
   }
 
@@ -559,7 +579,7 @@ function reconnect() {
 
   return connect(_options.url)
   .then(() => {
-    logger.info('AMQP connection reconnected successfully');
+    logger.info('Event stream connection reconnected successfully');
     _retrying = false;
     _currentWaitTime = _waitTimes[0];
 
@@ -588,7 +608,7 @@ function reconnect() {
 
     logger.error('Reconnect failed.', err);
 
-    logger.warn(`Will try to reconnect AMQP connection in ${_currentWaitTime} seconds`);
+    logger.warn(`Will try to reconnect event stream connection in ${_currentWaitTime} seconds`);
     // Call itself again, the 'bind' here is crucial
     setTimeout(reconnect, _currentWaitTime * 1000);
     updateCurrentWaitTime(); // will make the waitTime longer for next time

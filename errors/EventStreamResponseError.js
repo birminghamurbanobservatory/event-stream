@@ -1,6 +1,6 @@
-const EventStreamError = require('./EventStreamError');
+const EventStreamOperationalError = require('./EventStreamOperationalError');
 
-module.exports = class EventStreamResponseError extends EventStreamError {
+module.exports = class EventStreamResponseError extends EventStreamOperationalError {
   constructor(name, message = 'Error returned by the microservice that handled the event stream request.', statusCode) {
     super(message);
     // Instead of using the name of the class, let's use the name of the error as it appears in the event stream payload.
