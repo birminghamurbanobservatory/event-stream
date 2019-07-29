@@ -5,5 +5,7 @@ module.exports = class EventStreamError extends Error {
     this.name = this.constructor.name;
     // Capturing stack trace, excluding constructor call from it.
     Error.captureStackTrace(this, this.constructor);
+    // Add a statusCode, useful when converting an error object to a HTTP response
+    this.statusCode = 500;    
   }
 };
