@@ -440,14 +440,18 @@ function subscribe(eventName, cbFunc) {
       }
 
     } else {
-      if (bindCorrelationIdToCbFunc) {
-        await _options.withCorrelationId(async () => {
+      try {
+        if (bindCorrelationIdToCbFunc) {
+          await _options.withCorrelationId(async () => {
+            await cbFunc(message.body);
+            return;
+          }, message.correlationId);
+        } else {
           await cbFunc(message.body);
-          return;
-        }, message.correlationId);
-      } else {
-        await cbFunc(message.body);
-      } 
+        } 
+      } catch (err) {
+        logsEmitter.error(`Error occurred whilst processing the subscription handler. This error will not be returned the the publisher, as the publisher is not expecting a response. ${err.message}`);
+      }
     }
 
     return;
