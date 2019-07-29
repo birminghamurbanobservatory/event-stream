@@ -555,6 +555,8 @@ function respondToRequest(response, replyTo, replyId, correlationId) {
     messageToSend.body = response;
   }
 
+  logsEmitter.debug(`Responding to request on queue: ${replyTo}, with replyId: ${replyId}, correlationId: ${correlationId}, and response: ${response}`);
+
   const bufferToSend = convertToBuffer(messageToSend);
 
   _channel.sendToQueue(replyTo, bufferToSend); // synchronous
