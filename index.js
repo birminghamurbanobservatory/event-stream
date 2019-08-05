@@ -170,7 +170,8 @@ function publish(eventName, body, opts = {}) {
     return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
-  if (!(check.string(body) || check.object(body) || check.array(body))) {
+  const isBody = check.assigned(body); 
+  if (isBody && (!(check.string(body) || check.object(body) || check.array(body)))) {
     return Promise.reject(new InvalidPublishBody('The message body must be a string or POJO'));
   }
 
@@ -206,9 +207,12 @@ function publish(eventName, body, opts = {}) {
   }
 
   const message = {
-    body,
     correlationId
   };
+
+  if (isBody) {
+    message.body = body;
+  }
 
   // Convert message to a buffer
   const messageBuffer = convertToBuffer(message);
@@ -245,9 +249,10 @@ function publishExpectingResponse(eventName, body, opts) {
     return Promise.reject(new InvalidEventName('eventName should be a non-empty string'));
   }
 
-  if (!(check.string(body) || check.object(body) || check.array(body))) {
+  const isBody = check.assigned(body); 
+  if (isBody && (!(check.string(body) || check.object(body) || check.array(body)))) {
     return Promise.reject(new InvalidPublishBody('The message body must be a string or POJO'));
-  }    
+  }
 
   if (_initialised !== true) {
     return Promise.reject(new EventStreamError('Event stream must first be initialised'));
@@ -290,11 +295,14 @@ function publishExpectingResponse(eventName, body, opts) {
   const options = Object.assign({}, defaultOptions, validOptions);
 
   const message = {
-    body,
     correlationId: options.correlationId,
     replyTo: options.replyTo,
     replyId
   };
+
+  if (isBody) {
+    message.body = body;
+  }
 
   const messageBuffer = convertToBuffer(message);
 
