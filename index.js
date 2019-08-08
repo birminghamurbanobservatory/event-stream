@@ -480,7 +480,7 @@ function subscribe(eventName, cbFunc) {
   _subscriptions.push({eventName, cbFunc: cbFuncWithWrapper});
 
   if (_connected !== true) {
-    return Promise.reject(new EventStreamError('Currently not connected to the event stream'));
+    return Promise.reject(new NoEventStreamConnection('Currently not connected to the event stream'));
   } else {
     return consume(eventName, cbFuncWithWrapper);
   }  
