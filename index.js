@@ -104,7 +104,7 @@ function init(opts) {
     return Promise.reject(new EventStreamError(`Invalid init options: ${err.message}`));
   }
 
-  logsEmitter.debug(`Initialising event stream with url: ${options.url} and appName: ${options.appName}`);
+  logsEmitter.debug(`Initialising event stream with url: ${options.url}, and appName: ${options.appName}.`);
 
   _options = options;
 
