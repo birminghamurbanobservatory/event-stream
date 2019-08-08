@@ -79,6 +79,8 @@ const _subscriptions = [];
 // returns a promise when it's ready to accept publish and subscribe's.
 function init(opts) {
 
+  logsEmitter.debug('Starting initialisation of event stream');
+
   if (_initialised === true) {
     return Promise.reject(new EventStreamError('Event stream already initialised'));
   }
@@ -95,11 +97,14 @@ function init(opts) {
   })
   .required();
 
+  
   const {error: err, value: options} = joi.validate(opts, schema);
-
+  
   if (err) {
     return Promise.reject(new EventStreamError(`Invalid init options: ${err.message}`));
   }
+
+  logsEmitter.debug(`Initialising event stream with url: ${options.url} and appName: ${options.appName}`);
 
   _options = options;
 
@@ -183,6 +188,8 @@ function publish(eventName, body, opts = {}) {
     return Promise.reject(new NoEventStreamConnection('Currently not connected to the event stream'));
   }
 
+  logsEmitter.debug(`Publishing a new message with eventName: ${eventName}`);
+
   // Validate the opts object
   const schema = joi.object({
     correlationId: joi.string()
@@ -261,6 +268,8 @@ function publishExpectingResponse(eventName, body, opts) {
   if (_connected !== true) {
     return Promise.reject(new NoEventStreamConnection('Currently not connected to the event stream'));
   }
+
+  logsEmitter.debug(`Publishing a new message (expecting response) with eventName: ${eventName}`);
 
   const optionsSchema = joi.object({
     correlationId: joi.string()
@@ -414,6 +423,8 @@ function subscribe(eventName, cbFunc) {
   if (_initialised !== true) {
     return Promise.reject(new EventStreamError('Event stream must first be initialised'));
   } 
+
+  logsEmitter.debug(`Adding a new supscription to the eventName: ${eventName}`);
 
   // It's possible that the message received has a replyTo property, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to.
   const cbFuncWithWrapper = async function (message) {
@@ -658,11 +669,13 @@ function reconnect() {
     _retrying = false;
     _currentWaitTime = _waitTimes[0];
 
+    logsEmitter.debug(`${_subscriptions.length} subscriptions need to be restablished`);
+
     if (_subscriptions.length > 0) {
 
       // Re-establish any subscriptions we had
       return Promise.map(_subscriptions, (sub) => {
-        logsEmitter.debug(`About to try reconnecting ${sub.eventName}`);
+        logsEmitter.debug(`About to try reconnecting the ${sub.eventName} subscription`);
         return consume(sub.eventName, sub.cbFunc)
         .then(() => {
           logsEmitter.info(`Successfully re-established the ${sub.eventName} subscription`);
