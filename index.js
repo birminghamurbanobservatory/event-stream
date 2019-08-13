@@ -544,8 +544,8 @@ function consume(exchangeName, cbFunc) {
 // reponse can be a string or POJO reponse that will for the message body, or it can be an Error object in which case the message will include an error object.
 function respondToRequest(response, replyTo, replyId, correlationId) {
 
-  if (!(check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
-    return Promise.reject(new EventStreamError('The response must be a string, POJO or Error object.'));
+  if (!(check.undefined(response) || check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
+    return Promise.reject(new EventStreamError('The response must be either undefined, a string, a POJO or an Error object.'));
   }
 
   if (check.not.nonEmptyString(replyTo)) {
