@@ -356,7 +356,7 @@ function publishExpectingResponse(eventName, body, opts) {
       .then(() => {
         // Marking the messages as persistent will mean RabbitMQ will save them to disk, thus reducing the chances of messages being lost if RabbitMQ restarts.
         const publishOptions = {persistent: true};
-        publishOptions.expiration = options.timeout;
+        publishOptions.expiration = options.timeout; // if no reply after a while then remove the message.
         return _channel.publish(eventName, '', messageBuffer, publishOptions);
       })
       .catch((err) => {
