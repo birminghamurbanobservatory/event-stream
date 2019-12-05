@@ -424,7 +424,7 @@ function subscribe(eventName, cbFunc) {
     return Promise.reject(new EventStreamError('Event stream must first be initialised'));
   } 
 
-  logsEmitter.debug(`Adding a new supscription to the eventName: ${eventName}`);
+  logsEmitter.debug(`Adding a new subscription to the eventName: ${eventName}`);
 
   // It's possible that the message received has a replyTo property, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to.
   const cbFuncWithWrapper = async function (message) {
