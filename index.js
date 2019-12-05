@@ -615,9 +615,6 @@ function convertToBuffer(toSend) {
 //-------------------------------------------------
 function convertFromBuffer(buf) {
 
-  logsEmitter.debug('Buffer received');
-  logsEmitter.debug(buf);
-
   // First get it back as a string
   const msgStr = buf.content.toString();
 
