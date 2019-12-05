@@ -615,11 +615,23 @@ function convertToBuffer(toSend) {
 //-------------------------------------------------
 function convertFromBuffer(buf) {
 
+  logsEmitter.debug('Buffer received');
+  logsEmitter.debug(buf);
+
   // First get it back as a string
   const msgStr = buf.content.toString();
 
+  logsEmitter.debug(`Raw message as string: ${msgStr}`);
+
   // If the string is in JSON format then let's convert it to a POJO
-  return isJsonString(msgStr) ? JSON.parse(msgStr) : msgStr;
+  const isItJson = isJsonString(msgStr);
+
+  if (isItJson) {
+    logsEmitter.debug('The message is valid JSON');
+  } else {
+    logsEmitter.debug('The message is not valid JSON and will be treated as a string instead');
+  }
+  return isItJson ? JSON.parse(msgStr) : msgStr;
 
 }
 
