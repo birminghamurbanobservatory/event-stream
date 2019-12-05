@@ -469,7 +469,7 @@ function subscribe(eventName, cbFunc) {
           await cbFunc(message.body);
         } 
       } catch (err) {
-        logsEmitter.error(`Error occurred whilst processing the subscription handler. This error will not be returned the the publisher, as the publisher is not expecting a response. Error message: ${err.message}`);
+        logsEmitter.error(`Error occurred whilst processing the subscription handler. This error will not be returned to the publisher, as the publisher is not expecting a response. Error message: ${err.message}`);
       }
     }
 
