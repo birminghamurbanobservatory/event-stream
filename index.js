@@ -25,7 +25,7 @@ const {
 
 
 //-------------------------------------------------
-// Create an event emitter
+// Create an event emitter for logs
 //-------------------------------------------------
 function LogsObservable() {  
   EventEmitter.call(this);
@@ -46,6 +46,13 @@ LogsObservable.prototype.debug = function (message) {
 };
 
 const logsEmitter = new LogsObservable();
+
+
+//-------------------------------------------------
+// Create an event emitter for replyTo responses
+//-------------------------------------------------
+const replyEmitter = new EventEmitter();
+
 
 //-------------------------------------------------
 // Module Exports
@@ -71,6 +78,21 @@ let _retrying = false;
 let _connected = false;
 let _options;
 const _subscriptions = [];
+const _configForRequestQueues = {durable: false, exclusive: false, 'x-queue-mode': 'default'};
+const _configForFireForgetQueues = {durable: true, exclusive: false, 'x-queue-mode': 'lazy'};
+const _typeForErrors = 'error';
+const _noContentString = '---no-content---';
+
+// -- Request queues config --
+// The messages on these queues will have a time limit, and need to be handled in a timely fashion because a microservice (and probably a human) is actively waiting for a response.
+// Therefore there they should not be lazy in order to incrase throughput speed, and don't need to be durable and the messages themselves won't be persistant.
+
+// -- Queues for fire/forget messages --
+// These type of queues will be used when the message can be handled in a less timely fashion, e.g. processing of observations. We also want to ensure the messages on these queues won't be lost, hence making it durable.
+// durable: true, means the queues are recoved if RabbitMQ restarts
+// exclusive: false, will allow multiple instances of a microservices to listen to the same queue.
+// 'x-queue-mode': 'lazy', provides more predictive performance as the messages will be automatically stored to disk (https://www.cloudamqp.com/blog/2017-12-29-part1-rabbitmq-best-practice.html).
+
 
 
 //-------------------------------------------------
@@ -98,7 +120,7 @@ function init(opts) {
   .required();
 
   
-  const {error: err, value: options} = joi.validate(opts, schema);
+  const {error: err, value: options} = schema.validate(opts);
   
   if (err) {
     return Promise.reject(new EventStreamError(`Invalid init options: ${err.message}`));
@@ -114,6 +136,7 @@ function init(opts) {
   return connect(_options.url)
   .then(() => {
     logsEmitter.info('Event stream connection has been made');
+    listenToGenericReplyToQueue(); // await for this?
     return;
   })
   .catch((err) => {
@@ -123,6 +146,29 @@ function init(opts) {
   });
 
 }
+
+
+//-------------------------------------------------
+// Listen for all replies
+//-------------------------------------------------
+// In order to support a RPC communication (i.e. request/reply) we'll use RabbitMQ's Direct Reply-to system (https://www.rabbitmq.com/direct-reply-to.html).
+// This requires us to listen to a single queue to which all the replies will come through. What's clever about this particular system is that the replies will only ever be received by the particular microservice instance that made the request. 
+// We use a event-emitter approach to emit when the reply comes in, to which the code that made the request can listen to.
+function listenToGenericReplyToQueue() {
+
+  // The 'amq.rabbitmq.reply-to' already exists within RabbitMQ, there's no need to declare it first.
+  _channel.consume('amq.rabbitmq.reply-to', (rawMsg) => {
+
+    const replyCorrelationId = rawMsg.properties.correlationId;
+
+    if (replyCorrelationId) {
+      replyEmitter.emit(replyCorrelationId, rawMsg);
+    }
+
+  }, {noAck: true});
+
+}
+
 
 
 //-------------------------------------------------
@@ -192,43 +238,35 @@ function publish(eventName, body, opts = {}) {
 
   // Validate the opts object
   const schema = joi.object({
-    correlationId: joi.string()
-      .min(5)
+    correlationId: joi.string().min(5) // this is the correlationId used for tracking an action throughout multiple microservices.
   });
 
-  const {error: err, value: options} = joi.validate(opts, schema);
+  const {error: err, value: options} = schema.validate(opts);
 
   if (err) {
     Promise.reject(new EventStreamError(`Invalid publish options: ${err.message}`));
   }  
 
-  let correlationId;
-  // Use the correlationId passed to the function by default
+  let trackingCorrelationId;
+  // Use the correlationId passed to the function if available
   if (options.correlationId) {
-    correlationId = options.correlationId;
+    trackingCorrelationId = options.correlationId;
   // If not see if one is available via the getCorrelationId function. If not generate one.
   } else if (check.assigned(_options.getCorrelationId)) {
-    correlationId = _options.getCorrelationId() || shortId.generate();
+    trackingCorrelationId = _options.getCorrelationId() || shortId.generate();
   } else {
-    correlationId = shortId.generate();
+    trackingCorrelationId = shortId.generate();
   }
 
-  const message = {
-    correlationId
-  };
+  const messageBuffer = convertToBuffer(body);
 
-  if (isBody) {
-    message.body = body;
-  }
-
-  // Convert message to a buffer
-  const messageBuffer = convertToBuffer(message);
-
-  // Create the exchange, if it doesn't already exist. Setting it as durable means that if amqp quits/crashes then the queue won't be lost.
   return _channel.assertExchange(eventName, 'fanout', {durable: true})
   .then(() => {
     // Marking the messages as persistent will mean RabbitMQ will save them to disk, thus reducing the chances of messages being lost if RabbitMQ restarts.
-    const publishOptions = {persistent: true};
+    const publishOptions = {
+      persistent: true,
+      messageId: trackingCorrelationId
+    };
     return _channel.publish(eventName, '', messageBuffer, publishOptions);
   })
   .catch((err) => {
@@ -272,137 +310,107 @@ function publishExpectingResponse(eventName, body, opts) {
   logsEmitter.debug(`Publishing a new message (expecting response) with eventName: ${eventName}`);
 
   const optionsSchema = joi.object({
-    correlationId: joi.string()
+    correlationId: joi.string() // used to track an action through multiple microservice, NOT to match a reponse to a request
       .min(5),
-    replyTo: joi.string(),
     timeout: joi.number()
       .min(1)
       .max(30000)
   });
 
-  const {error: err, value: validOptions} = joi.validate(opts, optionsSchema);
+  const {error: err, value: validOptions} = optionsSchema.validate(opts);
 
   if (err) {
     return Promise.reject(new EventStreamError(`Invalid opts: ${err.message}`));
   }
 
-  let correlationIdIfNonePassedIn;
+  let trackingCorrelationIdIfNoneProvided;
   if (check.assigned(_options.getCorrelationId)) {
-    correlationIdIfNonePassedIn = _options.getCorrelationId() || shortId.generate();
+    trackingCorrelationIdIfNoneProvided = _options.getCorrelationId() || shortId.generate();
   } else {
-    correlationIdIfNonePassedIn = shortId.generate();
+    trackingCorrelationIdIfNoneProvided = shortId.generate();
   }
 
   const defaultOptions = {
-    correlationId: correlationIdIfNonePassedIn,
-    replyTo: shortId.generate(),
+    correlationId: trackingCorrelationIdIfNoneProvided,
     timeout: 5000
-  }; 
-
-  const replyId = shortId.generate();
+  };
 
   const options = Object.assign({}, defaultOptions, validOptions);
 
-  const message = {
-    correlationId: options.correlationId,
-    replyTo: options.replyTo,
-    replyId
-  };
+  const messageBuffer = convertToBuffer(body);
+  
+  const replyCorrelationId = shortId.generate();
 
-  if (isBody) {
-    message.body = body;
-  }
+  return _channel.assertExchange(eventName, 'fanout', {durable: true})
+  .then(() => {
+    const publishOptions = {
+      persistent: false, // doesn't make sense to recover messages, e.g. if rabbitMQ restarts, because probably timed-out anyway.
+      replyTo: 'amq.rabbitmq.reply-to', // this will make use of RabbitMQ's "Direct Reply-to" feature
+      expiration: options.timeout, // if no reply after a while then remove the message.
+      correlationId: replyCorrelationId,  // used to match a response to a request
+      messageId: options.correlationId // used to track an action through multiple microservices
+    };
+    return _channel.publish(eventName, '', messageBuffer, publishOptions);
+  })
+  .then(() => {
 
-  const messageBuffer = convertToBuffer(message);
+    // Create a new promise
+    return new Promise((resolve, reject) => {
 
-  let gotResponse = false;
+      // Now we need to wait for a response
+      replyEmitter.on(replyCorrelationId, (rawMsg) => {
 
-  // Begin by listening to the replyTo queue
-  return new Promise((resolve, reject) => {
+        const content = convertFromBuffer(rawMsg);
 
-    _channel.assertQueue(options.replyTo, {exclusive: true, autoDelete: true})
-    .then(() => {
+        const trackingCorrelationIdInReply = rawMsg.properties.messageId;
+        const canApplyCorrelationId = trackingCorrelationIdInReply && _options.withCorrelationId;
 
-      return _channel.consume(options.replyTo, (msgBuffer) => {
+        const isErrorMessage = rawMsg.properties.type === _typeForErrors;
+        let responseError;
+        if (isErrorMessage) {
+          responseError = new EventStreamResponseError(content.name, content.message, content.statusCode);
+        }
 
-        // When the queue is deleted a null message is emitted, we want to ignore this.
-        if (msgBuffer !== null) {
-          let msg;
-          try {
-            msg = convertFromBuffer(msgBuffer);
-          } catch (err) {
-            reject(err);
-          }
-
-          if (msg.replyId === replyId) {
-            if (msg.error) {
-              // N.B. this error uses the name from the event stream as its name property, rather than the name of the custom class like other custom classes would.
-              reject(new EventStreamResponseError(msg.error.name, msg.error.message, msg.error.statusCode));
+        if (canApplyCorrelationId) {
+          _options.withCorrelationId(() => {
+            if (!isErrorMessage) {
+              resolve(content);
             } else {
-              resolve(msg.body);
+              reject(responseError);
             }
-            gotResponse = true;
-            deleteReplyToQueue(options.replyTo);
+          }, trackingCorrelationIdInReply);
+        } else {
+          if (!isErrorMessage) {
+            resolve(content);
+          } else {
+            reject(responseError);
           }
         }
 
+        // Now that this response has been handled we can remove the listener.
+        replyEmitter.removeAllListeners(replyCorrelationId);
       });
 
-    })
-    .then(() => {
-
-      // Now to send the request
-      return _channel.assertExchange(eventName, 'fanout', {durable: true})
-      .then(() => {
-        // Marking the messages as persistent will mean RabbitMQ will save them to disk, thus reducing the chances of messages being lost if RabbitMQ restarts.
-        const publishOptions = {persistent: true};
-        publishOptions.expiration = options.timeout; // if no reply after a while then remove the message.
-        return _channel.publish(eventName, '', messageBuffer, publishOptions);
-      })
-      .catch((err) => {
-        // If the error is because the channel is closed, then let's try to reconnect
-        if (err.message === 'Channel closed') {
-          reactToFailedConnection();
-        }
-        // Continue to pass on the error so if can be handled further down the chain
-        return Promise.reject(err);
-      });      
-
-    })
-    .then(() => {
-
-      // Timeout if it takes too long to get a response
       setTimeout(() => {
-        if (!gotResponse) {
-          reject(new EventStreamResponseTimeout(`Timed out (${options.timeout} ms) whilst waiting for response to ${eventName}`));
-          deleteReplyToQueue(options.replyTo);
-        }
+        reject(new EventStreamResponseTimeout(`Timed out (${options.timeout} ms) whilst waiting for response to ${eventName}`));
+        // Still need to tidy up the event emitter.
+        replyEmitter.removeAllListeners(replyCorrelationId);
       }, options.timeout);
 
-    })
-    .catch((err) => {
-      reject(err);
     });
 
-  });
+  })
+  .catch((err) => {
+    // If the error is because the channel is closed, then let's try to reconnect
+    if (err.message === 'Channel closed') {
+      reactToFailedConnection();
+    }
+    // Continue to pass on the error so it can be handled further down the chain
+    return Promise.reject(err);
+  });      
   
 }
 
-
-//-------------------------------------------------
-// Delete replyTo queue
-//-------------------------------------------------
-function deleteReplyToQueue(queueName) {
-
-  _channel.deleteQueue(queueName)
-  .then(() => {
-    logsEmitter.debug(`The replyTo queue (${queueName}) has been deleted.`);
-  })
-  .catch((err) => {
-    logsEmitter.error(`Failed to delete queue: ${queueName}. Reason: ${err.message}`);
-  });
-
-}
 
 
 //-------------------------------------------------
@@ -410,6 +418,7 @@ function deleteReplyToQueue(queueName) {
 //-------------------------------------------------
 // eventName is the name of the event that will be used as the RabbitMQ queue name.
 // cbFunc is the function called whenever the event occurs.
+// Use the word 'request' in the eventName to optimise the queue type
 function subscribe(eventName, cbFunc) {
 
   if (check.not.nonEmptyString(eventName)) {
@@ -429,44 +438,51 @@ function subscribe(eventName, cbFunc) {
   // It's possible that the message received has a replyTo property, in this instance the original publisher (i.e. another microservice) is expecting a response, this wrapper will handle this logic so that the application using this package doesn't have to.
   const cbFuncWithWrapper = async function (message) {
 
-    // TODO: should I check the message is valid here, before handing it over to the cbFunc?
+    // N.b. the replyCorrelationId differs from the trackingCorrelationId. The former ensures the response can be matched to the request whilst the latter is used to trace/track an action through multiple microservices. The intended place in the message for the former is as the value of the correlationId in the properties, so this is what we'll use. We'll then use the messageId property for the trackingCorrelationId. 
+    const replyToQueue = message.properties.replyTo; // could be undefined if the client isn't expecting a response.
+    const replyCorrelationId = message.properties.correlationId; // could be undefined
+    const expectingReply = check.nonEmptyString(replyToQueue) && check.nonEmptyString(replyCorrelationId);
+    const content = convertFromBuffer(message);
+    const trackingCorrelationId = message.properties.messageId;
+    const canBindCorrelationIdToCbFunc = check.nonEmptyString(trackingCorrelationId) && check.assigned(_options.withCorrelationId);
 
-    const expectingReply = check.nonEmptyObject(message) && check.nonEmptyString(message.replyTo) && check.nonEmptyString(message.replyId);
-
-    // Set the current correlationId, i.e. so loggers in the client's cbFunc can access it.
-    const bindCorrelationIdToCbFunc = check.nonEmptyObject(message) && check.nonEmptyString(message.correlationId) && check.assigned(_options.withCorrelationId);
-
+    //------------------------
+    // Expecting a response
+    //------------------------
     if (expectingReply) {
-      logsEmitter.debug(`A ${eventName} event has been received with correlationId: ${message.correlationId}, which expects a response on a replyTo queue named: ${message.replyTo} with a replyId of ${message.replyId}`);
+      logsEmitter.debug(`A ${eventName} event has been received with a reply correlationId of ${replyCorrelationId} and a tracking correlationId of ${trackingCorrelationId}, which expects a response on a replyTo queue named: ${replyToQueue}.`);
       let response;
       try {
-        if (bindCorrelationIdToCbFunc) {
+        if (canBindCorrelationIdToCbFunc) {
           response = await _options.withCorrelationId(async () => {
-            const resultOfCbFunc = await cbFunc(message.body);
+            const resultOfCbFunc = await cbFunc(content);
             return resultOfCbFunc;
-          }, message.correlationId);
+          }, trackingCorrelationId);
         } else {
-          response = await cbFunc(message.body);
+          response = await cbFunc(content);
         }
       } catch (err) {
         response = err;
       }
 
       try {
-        await respondToRequest(response, message.replyTo, message.replyId, message.correlationId);
+        await respondToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId);
       } catch (err) {
         logsEmitter.error(`Failed to respond to an request that expected a response. Reason: ${err.message}`);
       }
 
+    //------------------------
+    // Not expecting response
+    //------------------------
     } else {
       try {
-        if (bindCorrelationIdToCbFunc) {
+        if (canBindCorrelationIdToCbFunc) {
           await _options.withCorrelationId(async () => {
-            await cbFunc(message.body);
+            await cbFunc(content);
             return;
-          }, message.correlationId);
+          }, trackingCorrelationId);
         } else {
-          await cbFunc(message.body);
+          await cbFunc(content);
         } 
       } catch (err) {
         logsEmitter.error(`Error occurred whilst processing the subscription handler. This error will not be returned to the publisher, as the publisher is not expecting a response. Error message: ${err.message}`);
@@ -508,7 +524,10 @@ function consume(exchangeName, cbFunc) {
     // Set the queue name as the name of the exchange postfixed by the name of the app (avoids issues with multiple instances).
     const queueName = `${exchangeName}.for-${_options.appName}`;
 
-    return _channel.assertQueue(queueName, {exclusive: false, durable: true})
+    const isRequestQueue = isRequestEvent(exchangeName);
+    const queueConfig = isRequestQueue ? _configForRequestQueues : _configForFireForgetQueues;
+
+    return _channel.assertQueue(queueName, queueConfig)
     .then((q) => {
 
       // Now let's bind this queue to the exchange
@@ -517,8 +536,7 @@ function consume(exchangeName, cbFunc) {
         
         // Tell the server to deliver us any messages in the queue.
         return _channel.consume(q.queue, (msg) => {
-          // After converting the buffer pass it into the provided function
-          cbFunc(convertFromBuffer(msg));
+          cbFunc(msg);
         }, {noAck: true});
 
       });
@@ -542,47 +560,53 @@ function consume(exchangeName, cbFunc) {
 // Response to request
 //-------------------------------------------------
 // reponse can be a string or POJO reponse that will for the message body, or it can be an Error object in which case the message will include an error object.
-function respondToRequest(response, replyTo, replyId, correlationId) {
+function respondToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId) {
 
   if (!(check.undefined(response) || check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
     return Promise.reject(new EventStreamError('The response must be either undefined, a string, a POJO or an Error object.'));
   }
 
-  if (check.not.nonEmptyString(replyTo)) {
-    return Promise.reject(new EventStreamError('replyTo should be a non-empty string'));
+  if (check.not.nonEmptyString(replyCorrelationId)) {
+    return Promise.reject(new EventStreamError('replyCorrelationId should be a non-empty string'));
   }  
 
-  if (check.not.nonEmptyString(replyId)) {
-    return Promise.reject(new EventStreamError('replyId should be a non-empty string'));
+  if (check.not.nonEmptyString(trackingCorrelationId)) {
+    return Promise.reject(new EventStreamError('trackingCorrelationId should be a non-empty string'));
   }
 
   const errorOccurred = check.instance(response, Error);
 
-  const messageToSend = {
-    replyId
-  };
-
-  if (correlationId) {
-    messageToSend.correlationId = correlationId;
-  }
+  let messageToSend;
   
   if (errorOccurred) {
-    messageToSend.error = {
+    messageToSend = {
       name: response.name,
       message: response.message
     };
     if (check.number(response.statusCode)) {
-      messageToSend.error.statusCode = response.statusCode;
+      messageToSend.statusCode = response.statusCode;
     }
   } else {
-    messageToSend.body = response;
+    messageToSend = response;
   }
 
-  logsEmitter.debug(`Responding to request on queue: ${replyTo}, with replyId: ${replyId}, correlationId: ${correlationId}, and response: ${response}`);
+  logsEmitter.debug(`Responding to request on queue: ${replyToQueue}, with a reply correlation id: ${replyCorrelationId}, and tracking correlation id: ${trackingCorrelationId}, and response: ${messageToSend}`);
 
   const bufferToSend = convertToBuffer(messageToSend);
 
-  _channel.sendToQueue(replyTo, bufferToSend); // synchronous
+  const sendOptions = {
+    correlationId: replyCorrelationId,
+    messageId: trackingCorrelationId,
+    persistent: false, // no point in persisting response messages
+    expiration: 60000 // likewise no point in keeping them in the queue if the original requester doens't handle it straight away.
+  };
+
+  if (errorOccurred) {
+    sendOptions.type = _typeForErrors;
+  }
+
+  // sychronous
+  _channel.sendToQueue(replyToQueue, bufferToSend, sendOptions); 
 
   return Promise.resolve();
 
@@ -597,7 +621,10 @@ function convertToBuffer(toSend) {
 
   let toSendStr;
 
-  if (check.string(toSend)) {
+  if (check.undefined(toSend)) {
+    // amqplib won't let you send nothing at all as the content, therefore if we want to send nothing we need to send something that implies nothing.
+    toSendStr = _noContentString;
+  } else if (check.string(toSend)) {
     toSendStr = toSend;
   } else if (check.object(toSend) || check.array(toSend)) {
     toSendStr = JSON.stringify(toSend);
@@ -625,10 +652,14 @@ function convertFromBuffer(buf) {
 
   if (isItJson) {
     logsEmitter.debug('The message is valid JSON');
+    return JSON.parse(msgStr);
+  } else if (msgStr === _noContentString) {
+    logsEmitter.debug(`The message has no content.`);
+    return;
   } else {
-    logsEmitter.debug('The message is not valid JSON and will be treated as a string instead');
+    logsEmitter.debug('The message was a string');
+    return msgStr;
   }
-  return isItJson ? JSON.parse(msgStr) : msgStr;
 
 }
 
@@ -643,6 +674,16 @@ function isJsonString(str) {
     return false;
   }
   return true;
+}
+
+
+//-------------------------------------------------
+// Is event a request
+//-------------------------------------------------
+// If the event name contains the word request, e.g. 'deployment.get.request', then it implies it's an event that will be expecting a reply.
+function isRequestEvent(eventName) {
+  const nameParts = eventName.split('.') ;
+  return nameParts.includes('request');
 }
 
 

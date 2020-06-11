@@ -9,18 +9,17 @@
   },
   "author": "Simon Bell",
   "license": "ISC",
+  "dependencies": {
+    "@hapi/joi": "^17.1.1",
+    "amqplib": "^0.5.6",
+    "bluebird": "^3.7.2",
+    "check-types": "^11.1.2",
+    "require-directory": "^2.1.1",
+    "shortid": "^2.2.15"
+  },
   "devDependencies": {
     "cls-hooked": "^4.2.2",
-    "jest": "^24.8.0",
+    "jest": "^26.0.1",
     "node-logger": "github:birminghamurbanobservatory/node-logger#semver:^1.0.0"
-  },
-  "dependencies": {
-    "@hapi/joi": "^15.1.0",
-    "amqp": "^0.2.7",
-    "amqplib": "^0.5.3",
-    "bluebird": "^3.5.5",
-    "check-types": "^9.0.1",
-    "require-directory": "^2.1.1",
-    "shortid": "^2.2.14"
   }
 }

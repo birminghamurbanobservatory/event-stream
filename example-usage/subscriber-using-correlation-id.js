@@ -23,8 +23,8 @@ const eventName = 'the-time';
 event.init({
   url, 
   appName,
-  withCorrelationId: correlator.withId,
-  getCorrelationId: correlator.getId
+  withCorrelationId: correlator.withCorrelationId,
+  getCorrelationId: correlator.getCorrelationId
 })
 .then(() => {
   logger.debug('Initialisation ok');
@@ -61,7 +61,7 @@ function startSubscribing() {
     logger.debug(`New ${eventName} event message: ${message}`);
 
     // Let's see if the correlationId is available.
-    const correlationId = correlator.getId();
+    const correlationId = correlator.getCorrelationId();
     logger.debug(`CorrelationId: ${correlationId}`);
     
   })

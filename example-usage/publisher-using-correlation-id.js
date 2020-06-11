@@ -25,8 +25,8 @@ const eventName = 'the-time';
 event.init({
   url, 
   appName,
-  withCorrelationId: correlator.withId,
-  getCorrelationId: correlator.getId
+  withCorrelationId: correlator.withCorrelationId,
+  getCorrelationId: correlator.getCorrelationId
 })
 .then(() => {
   logger.debug('Initialisation ok');
@@ -70,9 +70,9 @@ function publishTime() {
   // There's a few different way to set the correlationId, you can set it using the correlator and event-stream will get it via the getCorrelationId function, or you can pass it directly to the publish function, or you can let it create one itself.
   const correlationId = `aaaaaa${timeNowStr.slice(20, 23)}`;
   
-  // correlator.setId(correlationId);
+  // correlator.setCorrelationId(correlationId);
 
-  correlator.withId(() => {
+  correlator.withCorrelationId(() => {
 
     event.publish(eventName, `The time is ${timeNowStr}`)
     .then(() => {

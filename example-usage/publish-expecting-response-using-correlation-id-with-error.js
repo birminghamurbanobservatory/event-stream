@@ -17,7 +17,7 @@ logger.configure({
   level: 'debug', 
   enabled: true, 
   format: 'terminal',
-  getCorrelationId: correlator.getId
+  getCorrelationId: correlator.getCorrelationId
 });
 const url = 'amqp://localhost';
 const appName = 'example-app';
@@ -30,8 +30,8 @@ const eventName = 'double-my-number';
 event.init({
   url, 
   appName,
-  withCorrelationId: correlator.withId,
-  getCorrelationId: correlator.getId
+  withCorrelationId: correlator.withCorrelationId,
+  getCorrelationId: correlator.getCorrelationId
 })
 .then(() => {
   logger.debug('Initialisation ok');
@@ -74,7 +74,7 @@ function publishNumber(myNumber) {
 
   const correlationId = `aaaaaa${myNumber}`;
 
-  correlator.withId(() => {
+  correlator.withCorrelationId(() => {
 
     logger.debug(`Publishing number ${myNumber}`);
     event.publishExpectingResponse(eventName, {number: myNumber})
@@ -98,7 +98,7 @@ function startSubscribing() {
     logger.debug(`New ${eventName} event message:`, message);
 
     // Let's see if the correlationId is available.
-    const correlationId = correlator.getId();
+    const correlationId = correlator.getCorrelationId();
     logger.debug(`CorrelationId: ${correlationId}`);
     
     throw new Error('Example bad request');

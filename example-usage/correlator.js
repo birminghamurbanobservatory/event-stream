@@ -1,31 +1,34 @@
-const cls = require(`cls-hooked`);
-const shortId = require(`shortid`);
+const cls = require('cls-hooked');
+const shortId = require('shortid');
+
+// Based on: https://medium.com/@evgeni.kisel/add-correlation-id-in-node-js-applications-fde759eed5e3
 
 const store = cls.createNamespace(`correlation-id-namespace`);
 
 const CORRELATION_ID_KEY = `correlation-id`;
 
 // executes specified function with correlation ID. If ID is missing then new ID is generated
-async function withId(fn, id) {
+async function withCorrelationId(fn, id) {
   return store.runAndReturn(() => {
-    setId(id);
+    setCorrelationId(id);
     return fn();
   });
 }
 
-function setId(id) {
+function setCorrelationId(id) {
   store.set(CORRELATION_ID_KEY, id || shortId.generate());
   return;
 }
 
-function getId() {
+function getCorrelationId() {
   return store.get(CORRELATION_ID_KEY);
 }
 
+
 module.exports = {
-  withId,
-  getId,
-  setId,
+  withCorrelationId,
+  setCorrelationId,
+  getCorrelationId,
   bindEmitter: store.bindEmitter.bind(store),
   bind: store.bind.bind(store),
 };
