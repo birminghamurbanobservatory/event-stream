@@ -497,7 +497,8 @@ function subscribe(eventName, cbFunc) {
           await cbFunc(content);
         } 
       } catch (err) {
-        logsEmitter.error(`Error occurred whilst processing the subscription handler. This error will not be returned to the publisher, as the publisher is not expecting a response. Error message: ${err.message}`);
+        // I only want this logging at the debug level, because the application using this package should be responsible for handling/logging errors that occur within the callback function.
+        logsEmitter.debug(`Error occurred whilst processing the subscription handler. This error will not be returned to the publisher, as the publisher is not expecting a response. Error message: ${err.message}`);
       }
     }
 
