@@ -250,7 +250,8 @@ function publish(eventName, body, opts = {}) {
 
   // Validate the opts object
   const schema = joi.object({
-    correlationId: joi.string().min(5) // this is the correlationId used for tracking an action throughout multiple microservices.
+    correlationId: joi.string().min(5), // this is the correlationId used for tracking an action throughout multiple microservices.
+    replyTo: joi.string() // if the subscriber produces a result you can ask it to publish the result to this event name. N.b. unlike the publishExpectingReponse function below (which uses RabbitMQ's Direct Reply-To queues instead) this function does not start listening for responses with this event name.
   });
 
   const {error: err, value: options} = schema.validate(opts);
@@ -278,7 +279,11 @@ function publish(eventName, body, opts = {}) {
     const publishOptions = {
       persistent: true,
       messageId: trackingCorrelationId
+      // N.B. Do not set a property called 'correlationId' because the presense of this key would tell the subscriber that a Direct reply-to approach is being used. It's fine to use the messageId for our application's tracking correlation id though.
     };
+    if (options.replyTo) {
+      publishOptions.replyTo = options.replyTo;
+    }
     return _channel.publish(eventName, '', messageBuffer, publishOptions);
   })
   .catch((err) => {
@@ -453,7 +458,8 @@ function subscribe(eventName, cbFunc) {
     // N.b. the replyCorrelationId differs from the trackingCorrelationId. The former ensures the response can be matched to the request whilst the latter is used to trace/track an action through multiple microservices. The intended place in the message for the former is as the value of the correlationId in the properties, so this is what we'll use. We'll then use the messageId property for the trackingCorrelationId. 
     const replyToQueue = message.properties.replyTo; // could be undefined if the client isn't expecting a response.
     const replyCorrelationId = message.properties.correlationId; // could be undefined
-    const expectingReply = check.nonEmptyString(replyToQueue) && check.nonEmptyString(replyCorrelationId);
+    const expectingReply = check.nonEmptyString(replyToQueue);
+    const expectingDirectReply = expectingReply && replyCorrelationId;
     const content = convertFromBuffer(message);
     const trackingCorrelationId = message.properties.messageId;
     const canBindCorrelationIdToCbFunc = check.nonEmptyString(trackingCorrelationId) && check.assigned(_options.withCorrelationId);
@@ -477,10 +483,31 @@ function subscribe(eventName, cbFunc) {
         response = err;
       }
 
-      try {
-        await respondToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId);
-      } catch (err) {
-        logsEmitter.error(`Failed to respond to an request that expected a response. Reason: ${err.message}`);
+      // The two approaches used here are fundamentally different. The former, is in response to pubishers that have used the "publishExpectingResponse" approach. This "direct reply-to" approach is a RPC-type approach where we're replying to a requester that is actively waiting and will timeout if we don't reply soon. It makes use of RabbitMQ's special direct reply-to queue. The messages can be short-lived and the queue does not need to be durable. It WILL return errors.
+      // The latter approach is in response to publishers that have used the "publish" function with a replyTo option. This is simply for situations when the publisher has specified that the response should be published to an eventname of its choosing. This WON'T publish errors.
+      // -- Direct Response --
+      if (expectingDirectReply) {
+        try {
+          await respondDirectlyToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId);
+        } catch (err) {
+          logsEmitter.error(`Failed to respond to a request that expected a direct response. Reason: ${err.message}`);
+        }
+      // -- Publish Response to another queue --
+      } else {
+        try {
+          if (!(response instanceof Error)) {
+            // Technically here we'll be replying to an exchange not a queue. Which may not even have an subscribers in which case the message won't actually end up on a queue
+            const pubOptions = {};
+            if (trackingCorrelationId) {
+              pubOptions.correlationId = trackingCorrelationId;
+            } 
+            await publish(replyToQueue, response, pubOptions);
+          } else {
+            logsEmitter.debug('The response was an error, but because the Direct Reply-To approach is not being used in this instance the error will not be added to the event stream.');
+          }
+        } catch (err) {
+          logsEmitter.error('Error whilst trying to publish response (not using a direct reply-to approach)', err);
+        }
       }
 
     //------------------------
@@ -537,6 +564,7 @@ function consume(exchangeName, cbFunc) {
     // Set the queue name as the name of the exchange postfixed by the name of the app (avoids issues with multiple instances).
     const queueName = `${exchangeName}.for-${_options.appName}`;
 
+    // Essentially the type of queue used all comes down to whether the event name has the word 'request' in it when the subscriber starts listening.
     const isRequestQueue = isRequestEvent(exchangeName);
     const queueConfig = isRequestQueue ? _configForRequestQueues : _configForFireForgetQueues;
 
@@ -572,8 +600,8 @@ function consume(exchangeName, cbFunc) {
 //-------------------------------------------------
 // Response to request
 //-------------------------------------------------
-// reponse can be a string or POJO reponse that will for the message body, or it can be an Error object in which case the message will include an error object.
-function respondToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId) {
+// response can be undefined, a string, a POJO or it can be an Error object in which case the message will have an error type.
+function respondDirectlyToRequest(response, replyToQueue, replyCorrelationId, trackingCorrelationId) {
 
   if (!(check.undefined(response) || check.string(response) || check.object(response) || check.array(response) || check.instance(response, Error))) {
     return Promise.reject(new EventStreamError('The response must be either undefined, a string, a POJO or an Error object.'));
