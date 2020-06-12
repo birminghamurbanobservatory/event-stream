@@ -20,7 +20,9 @@ const {
   EventStreamResponseError,
   EventStreamOperationalError,
   NoEventStreamConnection,
-  EventStreamResponseTimeout
+  EventStreamResponseTimeout,
+  FailedToJoinDirectReplyToQueue,
+  ConnectDuringReconnectFail
 } = require('./errors');
 
 
@@ -136,13 +138,19 @@ function init(opts) {
   return connect(_options.url)
   .then(() => {
     logsEmitter.info('Event stream connection has been made');
-    listenToGenericReplyToQueue(); // await for this?
-    return;
   })
   .catch((err) => {
     logsEmitter.error(`Failed to connect to event stream. Reason: ${err.message}`);
     reactToFailedConnection();
     return Promise.reject(new NoEventStreamConnection('Failed to initialise event stream connection'));
+  })
+  .then(() => {
+    // If it was able to connect then we should start listening on the Direct Reply-To Queue
+    return listenToDirectReplyToQueue();
+  })
+  .then(() => {
+    logsEmitter.debug('Succesfully listening to the direct reply-to queue.');
+    return;
   });
 
 }
@@ -154,10 +162,10 @@ function init(opts) {
 // In order to support a RPC communication (i.e. request/reply) we'll use RabbitMQ's Direct Reply-to system (https://www.rabbitmq.com/direct-reply-to.html).
 // This requires us to listen to a single queue to which all the replies will come through. What's clever about this particular system is that the replies will only ever be received by the particular microservice instance that made the request. 
 // We use a event-emitter approach to emit when the reply comes in, to which the code that made the request can listen to.
-function listenToGenericReplyToQueue() {
+function listenToDirectReplyToQueue() {
 
   // The 'amq.rabbitmq.reply-to' already exists within RabbitMQ, there's no need to declare it first.
-  _channel.consume('amq.rabbitmq.reply-to', (rawMsg) => {
+  return _channel.consume('amq.rabbitmq.reply-to', (rawMsg) => {
 
     const replyCorrelationId = rawMsg.properties.correlationId;
 
@@ -165,7 +173,11 @@ function listenToGenericReplyToQueue() {
       replyEmitter.emit(replyCorrelationId, rawMsg);
     }
 
-  }, {noAck: true});
+  }, {noAck: true})
+  .catch(() => {
+    logsEmitter.error('Failed to join the direct reply-to queue');
+    return Promise.reject(new FailedToJoinDirectReplyToQueue());
+  });
 
 }
 
@@ -714,11 +726,22 @@ function reconnect() {
   _retrying = true;
 
   return connect(_options.url)
+  .catch((err) => {
+    // Let's throw a custom error here. This will also make sure the .then statements below won't run, which is what want as they won't work with a connection anyway.
+    return Promise.reject(new ConnectDuringReconnectFail(`Failed to connect during reconnect. Reason: ${err.message}.`));
+  })
   .then(() => {
     logsEmitter.info('Event stream connection reconnected successfully');
     _retrying = false;
     _currentWaitTime = _waitTimes[0];
 
+    // We need to reconnect to the direct reply-to queue too
+    return listenToDirectReplyToQueue();
+  })
+  .then(() => {
+    logsEmitter.debug('Listening to the direct reply-to queue again');
+
+    // Now to resubscribe to any subscriptions that were present before the connect was lost.
     logsEmitter.debug(`${_subscriptions.length} subscriptions need to be restablished`);
 
     if (_subscriptions.length > 0) {
@@ -744,12 +767,15 @@ function reconnect() {
   })
   .catch((err) => {
 
-    logsEmitter.error(`Reconnect failed. Reason: ${err.message}`);
+    logsEmitter.error(`Reconnect issue. Reason: ${err.message}`);
 
-    logsEmitter.info(`Will try to reconnect event stream connection in ${_currentWaitTime} seconds`);
-    // Call itself again, the 'bind' here is crucial
-    setTimeout(reconnect, _currentWaitTime * 1000);
-    updateCurrentWaitTime(); // will make the waitTime longer for next time
+    // If the issue was that we couldn't connect then we'll want to try again in a bit.
+    if (err.name === 'ConnectDuringReconnectFail') {
+      logsEmitter.info(`Will try to reconnect event stream connection in ${_currentWaitTime} seconds`);
+      // Call itself again, the 'bind' here is crucial
+      setTimeout(reconnect, _currentWaitTime * 1000);
+      updateCurrentWaitTime(); // will make the waitTime longer for next time
+    } 
 
   });
 
