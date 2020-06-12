@@ -11,7 +11,7 @@ const Promise = require('bluebird');
 logger.configure({level: 'debug', enabled: true, format: 'terminal'});
 const url = 'amqp://localhost';
 const appName = 'example-app';
-const eventName = 'some-event';
+const eventName = 'double-my-number.request'; // n.b. the word request in the name
 
 
 //-------------------------------------------------

@@ -80,8 +80,8 @@ let _retrying = false;
 let _connected = false;
 let _options;
 const _subscriptions = [];
-const _configForRequestQueues = {durable: false, exclusive: false, 'x-queue-mode': 'default'};
-const _configForFireForgetQueues = {durable: true, exclusive: false, 'x-queue-mode': 'lazy'};
+const _configForRequestQueues = {durable: false, exclusive: false, 'x-queue-mode': 'default', autoDelete: true};
+const _configForFireForgetQueues = {durable: true, exclusive: false, 'x-queue-mode': 'lazy', autoDelete: false};
 const _typeForErrors = 'error';
 const _noContentString = '---no-content---';
 
@@ -94,6 +94,7 @@ const _noContentString = '---no-content---';
 // durable: true, means the queues are recoved if RabbitMQ restarts
 // exclusive: false, will allow multiple instances of a microservices to listen to the same queue.
 // 'x-queue-mode': 'lazy', provides more predictive performance as the messages will be automatically stored to disk (https://www.cloudamqp.com/blog/2017-12-29-part1-rabbitmq-best-practice.html).
+// autoDelete: The queue is kept even after the last consumer unsubscribes.
 
 
 
@@ -435,7 +436,7 @@ function publishExpectingResponse(eventName, body, opts) {
 //-------------------------------------------------
 // eventName is the name of the event that will be used as the RabbitMQ queue name.
 // cbFunc is the function called whenever the event occurs.
-// Use the word 'request' in the eventName to optimise the queue type
+// Include or omit the word 'request' from the eventName to optimise the queue type, either for RPC type communication or fire and forget type communication respectively.
 function subscribe(eventName, cbFunc) {
 
   if (check.not.nonEmptyString(eventName)) {
