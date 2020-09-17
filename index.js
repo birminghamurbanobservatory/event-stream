@@ -117,7 +117,7 @@ function init(opts) {
             .required(),
     appName: joi.string()
       .required(),
-    prefetchCount: joi.number(),
+    maxMessagesAtOnce: joi.number(),
     withCorrelationId: joi.func(),
     getCorrelationId: joi.func()
   })
@@ -205,10 +205,10 @@ function connect(url) {
     return _conn.createChannel()
     .then((channel) => {
 
-      if (_options.prefetchCount) {
-        return channel.prefetch(_options.prefetchCount)
+      if (_options.maxMessagesAtOnce) {
+        return channel.prefetch(_options.maxMessagesAtOnce)
         .then(() => {
-          logsEmitter.debug(`A prefetch count of ${_options.prefetchCount} has been set on the channel`);
+          logsEmitter.debug(`A prefetch count of ${_options.maxMessagesAtOnce} has been set on the channel`);
           return channel;
         });
       } else {

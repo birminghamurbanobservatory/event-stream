@@ -16,7 +16,7 @@ logger.configure({level: 'debug', enabled: true, format: 'terminal'});
 const url = 'amqp://localhost';
 const appName = 'example-app';
 const eventName = 'queue-with-spikes';
-const prefetchCount = 5;
+const maxMessagesAtOnce = 5;
 const minProcessTime = 2000
 const maxProcessTime = 3000;
 
@@ -27,7 +27,7 @@ const maxProcessTime = 3000;
 event.init({
   url, 
   appName,
-  prefetchCount
+  maxMessagesAtOnce
 })
 .then(() => {
   logger.debug('Initialisation ok');
