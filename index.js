@@ -117,6 +117,7 @@ function init(opts) {
             .required(),
     appName: joi.string()
       .required(),
+    prefetchCount: joi.number(),
     withCorrelationId: joi.func(),
     getCorrelationId: joi.func()
   })
@@ -203,6 +204,20 @@ function connect(url) {
 
     return _conn.createChannel()
     .then((channel) => {
+
+      if (_options.prefetchCount) {
+        return channel.prefetch(_options.prefetchCount)
+        .then(() => {
+          logsEmitter.debug(`A prefetch count of ${_options.prefetchCount} has been set on the channel`);
+          return channel;
+        });
+      } else {
+        return channel;
+      }
+
+    })
+    .then((channel) => {
+
       _channel = channel;
       _connected = true;
 
@@ -530,6 +545,9 @@ function subscribe(eventName, cbFunc) {
       }
     }
 
+    // Now that the application-specific callback function has completed we'll need to acknowledge the message so that RabbitMQ knows that it can now delete it (and can send us the next message if we're running at the maximum prefetch capacity). Decided it's best to acknowledge it even if the callback function failed so that we don't get a back log of messages building up in our queue that potentially never get cleared.
+    await _channel.ack(message);
+
     return;
   };
 
@@ -579,7 +597,7 @@ function consume(exchangeName, cbFunc) {
         // Tell the server to deliver us any messages in the queue.
         return _channel.consume(q.queue, (msg) => {
           cbFunc(msg);
-        }, {noAck: true});
+        }, {noAck: false}); // needs to be false in order to support prefetch
 
       });
     });
