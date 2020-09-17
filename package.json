@@ -1,6 +1,6 @@
 {
   "name": "event-stream",
-  "version": "2.0.4",
+  "version": "2.1.0",
   "description": "Allows microservices to interact via an event stream.",
   "repository": "github:birminghamurbanobservatory/event-stream",
   "main": "index.js",
